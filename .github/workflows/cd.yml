@@ -1,0 +1,45 @@
+name: CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Deploy to ${{ github.event.inputs.environment || 'staging' }}
+        run: |
+          echo "Deploying to ${{ github.event.inputs.environment || 'staging' }}..."
+          # Add your deployment commands here
+          # Example: npm run deploy:${{ github.event.inputs.environment || 'staging' }}
+
+      - name: Notify deployment
+        if: always()
+        run: |
+          echo "Deployment to ${{ github.event.inputs.environment || 'staging' }} completed with status: ${{ job.status }}"

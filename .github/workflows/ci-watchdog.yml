@@ -1,0 +1,85 @@
+name: CI Watchdog
+
+on:
+  workflow_run:
+    workflows: ["CI", "CD"]
+    types:
+      - completed
+
+jobs:
+  watchdog:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download failed workflow logs
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.workflow_run.name }}-logs
+          path: logs/
+        continue-on-error: true
+
+      - name: Get workflow run logs via API
+        id: get_logs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RUN_ID=${{ github.event.workflow_run.id }}
+          REPO=${{ github.repository }}
+          
+          LOG_URL="https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/logs"
+          curl -L -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "$LOG_URL" -o logs.zip
+          unzip -o logs.zip -d logs/
+          echo "logs_path=logs" >> $GITHUB_OUTPUT
+
+      - name: Create failure issue
+        id: create_issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAPERCLIP_API_URL: ${{ secrets.PAPERCLIP_API_URL }}
+          PAPERCLIP_API_KEY: ${{ secrets.PAPERCLIP_API_KEY }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
+          COMMIT_MESSAGE: ${{ github.event.workflow_run.head_commit.message }}
+          COMMIT_AUTHOR: ${{ github.event.workflow_run.head_commit.author.name }}
+          RUN_STARTED_AT: ${{ github.event.workflow_run.run_started_at }}
+          RUN_ENDED_AT: ${{ github.event.workflow_run.updated_at }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          chmod +x .github/scripts/create-failure-issue.sh
+          .github/scripts/create-failure-issue.sh
+
+      - name: Wake assigned agent
+        if: steps.create_issue.outputs.agent_id != ''
+        env:
+          PAPERCLIP_API_URL: ${{ secrets.PAPERCLIP_API_URL }}
+          PAPERCLIP_API_KEY: ${{ secrets.PAPERCLIP_API_KEY }}
+        run: |
+          AGENT_ID="${{ steps.create_issue.outputs.agent_id }}"
+          ISSUE_ID="${{ steps.create_issue.outputs.issue_id }}"
+          curl -X POST "$PAPERCLIP_API_URL/api/companies/df33b840-b692-45ba-9a95-62d2341c95e6/issues/$ISSUE_ID/wake" \
+            -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"agent_id\": \"$AGENT_ID\", \"reason\": \"ci_failure_watchdog\"}"
+
+      - name: Record failure start time for MTTR
+        env:
+          PAPERCLIP_API_URL: ${{ secrets.PAPERCLIP_API_URL }}
+          PAPERCLIP_API_KEY: ${{ secrets.PAPERCLIP_API_KEY }}
+        run: |
+          ISSUE_ID="${{ steps.create_issue.outputs.issue_id }}"
+          START_TIME="${{ github.event.workflow_run.run_started_at }}"
+          curl -X POST "$PAPERCLIP_API_URL/api/companies/df33b840-b692-45ba-9a95-62d2341c95e6/issues/$ISSUE_ID/metadata" \
+            -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"mttr_started_at\": \"$START_TIME\"}"

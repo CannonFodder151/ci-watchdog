@@ -1,0 +1,74 @@
+name: MTTR Tracker
+
+on:
+  issues:
+    types: [closed]
+
+jobs:
+  track-mttr:
+    if: ${{ contains(github.event.issue.labels.*.name, 'ci-failure') }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get issue metadata
+        id: get_metadata
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAPERCLIP_API_URL: ${{ secrets.PAPERCLIP_API_URL }}
+          PAPERCLIP_API_KEY: ${{ secrets.PAPERCLIP_API_KEY }}
+        run: |
+          ISSUE_NUMBER=${{ github.event.issue.number }}
+          REPO=${{ github.repository }}
+          
+          ISSUE_RESPONSE=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/issues/$ISSUE_NUMBER")
+          
+          PAPERCLIP_ISSUE_ID=$(echo "$ISSUE_RESPONSE" | jq -r '.body' | grep -o 'Paperclip Issue ID: [a-f0-9-]*' | cut -d' ' -f3)
+          
+          if [ -z "$PAPERCLIP_ISSUE_ID" ] || [ "$PAPERCLIP_ISSUE_ID" = "null" ]; then
+            echo "Could not find Paperclip issue ID"
+            exit 1
+          fi
+          
+          METADATA_RESPONSE=$(curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+            "$PAPERCLIP_API_URL/api/companies/df33b840-b692-45ba-9a95-62d2341c95e6/issues/$PAPERCLIP_ISSUE_ID")
+          
+          MTTR_STARTED_AT=$(echo "$METADATA_RESPONSE" | jq -r '.metadata.mttr_started_at // empty')
+          
+          if [ -z "$MTTR_STARTED_AT" ] || [ "$MTTR_STARTED_AT" = "null" ]; then
+            echo "No MTTR start time found"
+            exit 1
+          fi
+          
+          echo "paperclip_issue_id=$PAPERCLIP_ISSUE_ID" >> $GITHUB_OUTPUT
+          echo "mttr_started_at=$MTTR_STARTED_AT" >> $GITHUB_OUTPUT
+
+      - name: Calculate and record MTTR
+        env:
+          PAPERCLIP_API_URL: ${{ secrets.PAPERCLIP_API_URL }}
+          PAPERCLIP_API_KEY: ${{ secrets.PAPERCLIP_API_KEY }}
+        run: |
+          PAPERCLIP_ISSUE_ID="${{ steps.get_metadata.outputs.paperclip_issue_id }}"
+          MTTR_STARTED_AT="${{ steps.get_metadata.outputs.mttr_started_at }}"
+          RESOLVED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          
+          START_EPOCH=$(date -d "$MTTR_STARTED_AT" +%s)
+          END_EPOCH=$(date -d "$RESOLVED_AT" +%s)
+          MTTR_SECONDS=$((END_EPOCH - START_EPOCH))
+          
+          MTTR_HOURS=$((MTTR_SECONDS / 3600))
+          MTTR_MINUTES=$(((MTTR_SECONDS % 3600) / 60))
+          
+          MTTR_FORMATTED="${MTTR_HOURS}h ${MTTR_MINUTES}m"
+          
+          curl -X POST "$PAPERCLIP_API_URL/api/companies/df33b840-b692-45ba-9a95-62d2341c95e6/issues/$PAPERCLIP_ISSUE_ID/mttr" \
+            -H "Authorization: Bearer $PAPERCLIP_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"started_at\": \"$MTTR_STARTED_AT\", \"resolved_at\": \"$RESOLVED_AT\", \"mttr_seconds\": $MTTR_SECONDS, \"mttr_formatted\": \"$MTTR_FORMATTED\"}"
+          
+          echo "MTTR: $MTTR_FORMATTED"
