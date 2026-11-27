@@ -90,15 +90,30 @@ Agent ID: $AGENT_ID
 ci-failure, $WORKFLOW_NAME, needs-investigation
 EOF
 
-ISSUE_RESPONSE=$(curl -s -X POST "https://api.github.com/repos/$REPO/issues" \
-  -H "Authorization: Bearer $GITHUB_TOKEN" \
-  -H "Accept: application/vnd.github+json" \
-  -d "$(jq -n \
-    --arg title "🚨 CI Failure: $WORKFLOW_NAME on $BRANCH" \
-    --arg body "$(cat /tmp/issue_body.md)" \
-    --argjson labels '["ci-failure", "'"$WORKFLOW_NAME"'", "needs-investigation"]' \
-    --arg assignee "$(echo "$AGENT_MAPPING" | jq -r --arg wf "$WORKFLOW_NAME" '.[$wf] // empty')" \
-    '{title: $title, body: $body, labels: $labels, assignees: [$assignee]}')")
+GH_ASSIGNEE=$(echo "$AGENT_MAPPING" | jq -r --arg wf "$WORKFLOW_NAME" '.[$wf] // empty')
+
+BODY_CONTENT=$(cat /tmp/issue_body.md)
+
+if [[ "$GH_ASSIGNEE" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]){0,38}$ ]] && [[ ! "$GH_ASSIGNEE" =~ ^[0-9a-f-]{36}$ ]]; then
+  ISSUE_RESPONSE=$(curl -s -X POST "https://api.github.com/repos/$REPO/issues" \
+    -H "Authorization: Bearer $GITHUB_TOKEN" \
+    -H "Accept: application/vnd.github+json" \
+    -d "$(jq -n \
+      --arg title "🚨 CI Failure: $WORKFLOW_NAME on $BRANCH" \
+      --arg body "$BODY_CONTENT" \
+      --argjson labels '["ci-failure", "'"$WORKFLOW_NAME"'", "needs-investigation"]' \
+      --arg assignee "$GH_ASSIGNEE" \
+      '{title: $title, body: $body, labels: $labels, assignees: [$assignee]}')")
+else
+  ISSUE_RESPONSE=$(curl -s -X POST "https://api.github.com/repos/$REPO/issues" \
+    -H "Authorization: Bearer $GITHUB_TOKEN" \
+    -H "Accept: application/vnd.github+json" \
+    -d "$(jq -n \
+      --arg title "🚨 CI Failure: $WORKFLOW_NAME on $BRANCH" \
+      --arg body "$BODY_CONTENT" \
+      --argjson labels '["ci-failure", "'"$WORKFLOW_NAME"'", "needs-investigation"]' \
+      '{title: $title, body: $body, labels: $labels}')")
+fi
 
 ISSUE_NUMBER=$(echo "$ISSUE_RESPONSE" | jq -r '.number // empty')
 ISSUE_ID=$(echo "$ISSUE_RESPONSE" | jq -r '.id // empty')
@@ -117,7 +132,7 @@ PAPERCLIP_ISSUE_RESPONSE=$(curl -s -X POST "$PAPERCLIP_API_URL/api/companies/df3
   -H "Content-Type: application/json" \
   -d "$(jq -n \
     --arg title "🚨 CI Failure: $WORKFLOW_NAME on $BRANCH" \
-    --arg description "$(cat /tmp/issue_body.md)" \
+    --arg description "$BODY_CONTENT" \
     --arg status "todo" \
     --arg project_id "default" \
     --arg assignee_agent_id "$AGENT_ID" \
@@ -136,7 +151,7 @@ if [ -n "$PAPERCLIP_ISSUE_ID" ] && [ "$PAPERCLIP_ISSUE_ID" != "null" ]; then
   curl -s -X PATCH "https://api.github.com/repos/$REPO/issues/$ISSUE_NUMBER" \
     -H "Authorization: Bearer $GITHUB_TOKEN" \
     -H "Accept: application/vnd.github+json" \
-    -d "$(jq -n --arg body "$(cat /tmp/issue_body.md)\n\n---\n**Paperclip Issue ID:** $PAPERCLIP_ISSUE_ID" '{body: $body}')" > /dev/null
+    -d "$(jq -n --arg body "$BODY_CONTENT\n\n---\n**Paperclip Issue ID:** $PAPERCLIP_ISSUE_ID" '{body: $body}')" > /dev/null
 fi
 
 echo "issue_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
